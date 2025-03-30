@@ -20,6 +20,9 @@ jobs:
 
       - name: Terraform Init
         run: terraform init
+      
+      - name: Terraform cd
+        run:  cd Terraform
          
       - name: Terraform Apply
         env:
@@ -27,6 +30,5 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run:
-         cd Terraform
          terraform apply -auto-approve
   
