@@ -1,86 +1,96 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
-
+# main.tf
 provider "aws" {
-  region = "ap-southeast-2"  # 修改为你的目标区域
+  region = "ap-southeast-2"
 }
 
-resource "aws_security_group" "app_sg" {
-  name        = "app-instance-sg"
-  description = "Security group for 3000 port application"
-
-  # SSH访问
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # 应用3000端口访问
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # 出站全部允许
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+# 生成随机后缀用于唯一 bucket 名字
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
 }
 
-resource "aws_instance" "app_instance" {
-  ami           = "ami-034488765f896f58f"  # Amazon Linux 2 AMI (us-east-1)
-  instance_type = "t2.micro"
-  key_name      = "devops"     # 替换为你的密钥对名称
+# 创建用于前端文件存储的 S3 Bucket
+resource "aws_s3_bucket" "frontend_bucket" {
+  bucket = "frontend-site-${random_id.bucket_suffix.hex}"
 
-  vpc_security_group_ids = [aws_security_group.app_sg.id]
-
-  user_data = <<-EOF
-              #!/bin/bash
-              # 更新系统
-              sudo yum update -y
-              
-              # 安装 Git
-              sudo yum install -y git
-              
-              # 安装 Node.js 20.x（最新LTS版本）
-              curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-              sudo yum install -y nodejs
-              
-              # 克隆代码仓库（替换为你的实际仓库地址）
-              git clone https://github.com/Innovate-Future-Association-Translation/translator-app.git /home/ec2-user/app
-              cd /home/ec2-user/app
-              
-              # 安装依赖并构建
-              npm install
-              npm run build
-              
-
-              
-              # 使用PM2持久化运行
-              sudo npm install -g pm2
-              pm2 startup
-              pm2 start npm --name "app" -- run start
-              pm2 save
-              EOF
+  website {
+    index_document = "index.html"
+    error_document = "404.html"
+  }
 
   tags = {
-    Name = "NodeJS-3000-Port-App"
+    Name = "FrontendHosting"
   }
 }
 
-output "application_url" {
-  value = "http://${aws_instance.app_instance.public_ip}:3000"
+# 设置 S3 Object Ownership（必须，才能不用 ACL）
+resource "aws_s3_bucket_ownership_controls" "ownership" {
+  bucket = aws_s3_bucket.frontend_bucket.id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+# 禁用阻止公共访问的策略
+resource "aws_s3_bucket_public_access_block" "public_access" {
+  bucket                  = aws_s3_bucket.frontend_bucket.id
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+# 设置 Bucket Policy 允许 public 读取文件
+resource "aws_s3_bucket_policy" "public_read" {
+  bucket = aws_s3_bucket.frontend_bucket.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.frontend_bucket.arn}/*"
+      }
+    ]
+  })
+
+  depends_on = [aws_s3_bucket_public_access_block.public_access]
+}
+
+# 上传本地 out 目录中的所有文件
+resource "aws_s3_bucket_object" "frontend_files" {
+  for_each = fileset("out", "**")
+
+  bucket = aws_s3_bucket.frontend_bucket.id
+  key    = each.value
+  source = "out/${each.value}"
+  etag   = filemd5("out/${each.value}")
+
+  content_type = lookup(
+    {
+      html = "text/html"
+      css  = "text/css"
+      js   = "application/javascript"
+      json = "application/json"
+      png  = "image/png"
+      jpg  = "image/jpeg"
+      jpeg = "image/jpeg"
+      svg  = "image/svg+xml"
+      ico  = "image/x-icon"
+      txt  = "text/plain"
+    },
+    regex("[^.]+$", each.value),
+    "application/octet-stream"
+  )
+
+  depends_on = [
+    aws_s3_bucket_policy.public_read
+  ]
+}
+
+# 输出访问地址
+output "website_url" {
+  value = aws_s3_bucket.frontend_bucket.website_endpoint
 }
